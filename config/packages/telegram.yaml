@@ -1,0 +1,11 @@
+# config/packages/telegram.yaml
+telegram:
+  bots:
+    joy_optimizer_primary:
+      token: '%env(TELEGRAM_BOT_TOKEN)%'
+      secret_token: '%env(TELEGRAM_SECRET_TOKEN)%'
+      webhook_url: 'https://your-domain.com/webhook/telegram/joy_optimizer_primary'
+    
+    joy_optimizer_beta:
+      token: '%env(TELEGRAM_BETA_BOT_TOKEN)%'
+      # ... конфигурация для тестового бота

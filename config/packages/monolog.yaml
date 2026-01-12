@@ -1,0 +1,14 @@
+# config/packages/monolog.yaml
+monolog:
+  channels: ['telegram', 'ai_processing']
+  handlers:
+    telegram_webhook:
+      type: rotating_file
+      path: '%kernel.logs_dir%/telegram_webhook.log'
+      level: 'info'
+      channels: ['telegram']
+    
+    ai_processing:
+      type: console
+      level: 'debug'
+      channels: ['ai_processing']

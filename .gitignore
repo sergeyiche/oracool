@@ -1,0 +1,73 @@
+###> symfony/framework-bundle ###
+/.env.local
+/.env.local.php
+/.env.*.local
+/config/secrets/prod/prod.decrypt.private.php
+/public/bundles/
+/var/
+/vendor/
+###< symfony/framework-bundle ###
+
+###> phpunit/phpunit ###
+/phpunit.xml
+.phpunit.result.cache
+###< phpunit/phpunit ###
+
+###> symfony/phpunit-bridge ###
+.phpunit.result.cache
+/phpunit.xml
+###< symfony/phpunit-bridge ###
+
+###> phpstan/phpstan ###
+/phpstan-baseline.neon
+/phpstan.neon
+###< phpstan/phpstan ###
+
+###> IDE ###
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+###< IDE ###
+
+###> Logs ###
+*.log
+/logs/
+###< Logs ###
+
+###> Cache ###
+/cache/
+###< Cache ###
+
+###> Composer ###
+composer.phar
+composer.lock
+###< Composer ###
+
+###> Node ###
+node_modules/
+npm-debug.log
+yarn-error.log
+###< Node ###
+
+###> Environment variables ###
+.env
+.env.local
+.env.*.local
+###< Environment variables ###
+
+###> Database ###
+*.db
+*.sqlite
+*.sqlite3
+###< Database ###
+
+###> Temporary files ###
+*.tmp
+*.temp
+*.bak
+*.swp
+*~
+###< Temporary files ###

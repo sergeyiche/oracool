@@ -1,0 +1,12 @@
+# config/routes/webhook.yaml
+telegram_webhook:
+  path: /webhook/telegram/{botId}
+  controller: App\Adapter\Telegram\TelegramWebhookController::handleWebhook
+  methods: ['POST']
+  requirements:
+    botId: '[a-zA-Z0-9_-]+'
+  
+  # Rate limiting для защиты от спама
+  defaults:
+    _rate_limit:
+      - { limit: 100, period: 60 } # 100 запросов в минуту
