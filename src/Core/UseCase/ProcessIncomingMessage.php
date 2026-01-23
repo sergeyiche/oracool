@@ -1,4 +1,5 @@
-// src/Core/UseCase/ProcessIncomingMessage.php
+<?php
+
 namespace App\Core\UseCase;
 
 use App\Core\Domain\Message\IncomingMessage;

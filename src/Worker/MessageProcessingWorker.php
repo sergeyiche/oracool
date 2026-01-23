@@ -1,7 +1,9 @@
-// src/Worker/MessageProcessingWorker.php
+<?php
+
 namespace App\Worker;
 
 use App\Core\UseCase\HandleMessageIntent;
+use App\Core\Port\Repository\ConversationRepositoryInterface;
 use Symfony\Component\Messenger\Attribute\AsMessageHandler;
 
 #[AsMessageHandler]

@@ -1,0 +1,197 @@
+parameters:
+    # Параметры из .env
+    embedding_provider: '%env(EMBEDDING_PROVIDER)%'
+    llm_provider: '%env(LLM_PROVIDER)%'
+    
+    # Ollama
+    ollama.base_url: '%env(OLLAMA_BASE_URL)%'
+    ollama.embedding_model: '%env(OLLAMA_EMBEDDING_MODEL)%'
+    ollama.llm_model: '%env(OLLAMA_LLM_MODEL)%'
+    ollama.embedding_dimension: '%env(int:OLLAMA_EMBEDDING_DIMENSION)%'
+    
+    # OpenAI
+    openai.api_key: '%env(OPENAI_API_KEY)%'
+    openai.embedding_model: '%env(OPENAI_EMBEDDING_MODEL)%'
+    openai.llm_model: '%env(OPENAI_LLM_MODEL)%'
+    openai.embedding_dimension: '%env(int:OPENAI_EMBEDDING_DIMENSION)%'
+    
+    # DeepSeek (совместимый с OpenAI API, но дешевле в ~10 раз)
+    deepseek.api_key: '%env(DEEPSEEK_API_KEY)%'
+    deepseek.base_url: '%env(DEEPSEEK_BASE_URL)%'
+    deepseek.llm_model: '%env(DEEPSEEK_LLM_MODEL)%'
+    
+    # Application
+    default_bot_mode: '%env(DEFAULT_BOT_MODE)%'
+    default_relevance_threshold: '%env(float:DEFAULT_RELEVANCE_THRESHOLD)%'
+    bot_owner_telegram_id: '%env(BOT_OWNER_TELEGRAM_ID)%'
+
+services:
+    _defaults:
+        autowire: true
+        autoconfigure: true
+        bind:
+            $defaultBotMode: '%default_bot_mode%'
+            $defaultRelevanceThreshold: '%default_relevance_threshold%'
+            $botOwnerTelegramId: '%bot_owner_telegram_id%'
+
+    # Автоматическое подключение сервисов из src/
+    App\:
+        resource: '../src/'
+        exclude:
+            - '../src/Core/Domain/'
+            - '../src/Kernel.php'
+
+    # === HTTP клиенты ===
+    
+    GuzzleHttp\Client:
+        class: GuzzleHttp\Client
+
+    # OpenAI клиент
+    OpenAI\Client:
+        factory: ['OpenAI', 'client']
+        arguments:
+            - '%openai.api_key%'
+    
+    # DeepSeek клиент (использует OpenAI SDK с другим base URL)
+    deepseek.client:
+        class: OpenAI\Client
+        factory: ['App\Adapter\AI\DeepSeekClientFactory', 'create']
+        arguments:
+            $apiKey: '%deepseek.api_key%'
+            $baseUrl: '%deepseek.base_url%'
+
+    # === Embedding Services ===
+    
+    # Ollama Embedding
+    embedding_service.ollama:
+        class: App\Adapter\AI\OllamaEmbeddingService
+        arguments:
+            $httpClient: '@GuzzleHttp\Client'
+            $logger: '@monolog.logger'
+            $baseUrl: '%ollama.base_url%'
+            $model: '%ollama.embedding_model%'
+            $dimension: '%ollama.embedding_dimension%'
+
+    # OpenAI Embedding
+    embedding_service.openai:
+        class: App\Adapter\AI\OpenAIEmbeddingService
+        arguments:
+            $openAIClient: '@OpenAI\Client'
+            $logger: '@monolog.logger'
+            $model: '%openai.embedding_model%'
+            $dimension: '%openai.embedding_dimension%'
+
+    # Выбор провайдера (автоматически переключается скриптом switch_llm.sh)
+    App\Core\Port\EmbeddingServiceInterface:
+        alias: 'embedding_service.ollama'
+
+    # === LLM Services ===
+    
+    # Ollama LLM
+    llm_service.ollama:
+        class: App\Adapter\AI\OllamaLLMService
+        arguments:
+            $httpClient: '@GuzzleHttp\Client'
+            $logger: '@monolog.logger'
+            $baseUrl: '%ollama.base_url%'
+            $model: '%ollama.llm_model%'
+
+    # OpenAI LLM
+    llm_service.openai:
+        class: App\Adapter\AI\OpenAILLMService
+        arguments:
+            $openAIClient: '@OpenAI\Client'
+            $logger: '@monolog.logger'
+            $model: '%openai.llm_model%'
+    
+    # DeepSeek LLM (дешевле OpenAI в ~10 раз, отлично для русского)
+    llm_service.deepseek:
+        class: App\Adapter\AI\DeepSeekLLMService
+        arguments:
+            $deepSeekClient: '@deepseek.client'
+            $logger: '@monolog.logger'
+            $model: '%deepseek.llm_model%'
+
+    # Выбор провайдера (автоматически переключается скриптом switch_llm.sh)
+    App\Core\Port\LLMServiceInterface:
+        alias: 'llm_service.deepseek'
+
+    # === Vector Search Service ===
+    
+    App\Adapter\Database\PostgreSQLVectorSearchService:
+        arguments:
+            $connection: '@doctrine.dbal.default_connection'
+            $logger: '@monolog.logger'
+
+    App\Core\Port\VectorSearchInterface:
+        alias: App\Adapter\Database\PostgreSQLVectorSearchService
+
+    # === Repositories ===
+    
+    App\Repository\DoctrineUserProfileRepository:
+        arguments:
+            $connection: '@doctrine.dbal.default_connection'
+
+    App\Core\Port\UserProfileRepositoryInterface:
+        alias: App\Repository\DoctrineUserProfileRepository
+
+    App\Repository\DoctrineKnowledgeBaseRepository:
+        arguments:
+            $connection: '@doctrine.dbal.default_connection'
+
+    App\Core\Port\KnowledgeBaseRepositoryInterface:
+        alias: App\Repository\DoctrineKnowledgeBaseRepository
+
+    App\Repository\DoctrineConversationRepository: ~
+
+    App\Core\Port\Repository\ConversationRepositoryInterface:
+        alias: App\Repository\DoctrineConversationRepository
+
+    App\Adapter\Queue\SymfonyMessengerQueue: ~
+
+    App\Core\Port\MessageQueue\MessageQueueInterface:
+        alias: App\Adapter\Queue\SymfonyMessengerQueue
+
+    # === Use Cases ===
+    
+    App\Core\UseCase\CheckRelevance:
+        arguments:
+            $embeddingService: '@App\Core\Port\EmbeddingServiceInterface'
+            $vectorSearch: '@App\Core\Port\VectorSearchInterface'
+            $logger: '@monolog.logger'
+
+    App\Core\UseCase\GenerateResponse:
+        arguments:
+            $llmService: '@App\Core\Port\LLMServiceInterface'
+            $embeddingService: '@App\Core\Port\EmbeddingServiceInterface'
+            $vectorSearch: '@App\Core\Port\VectorSearchInterface'
+            $logger: '@monolog.logger'
+
+    # === Adapters ===
+    
+    App\Adapter\Telegram\TelegramMessageMapper: ~
+
+    App\Adapter\Telegram\TelegramBotService:
+        arguments:
+            $httpClient: '@GuzzleHttp\Client'
+            $logger: '@monolog.logger'
+            $botToken: '%env(TELEGRAM_BOT_TOKEN)%'
+
+    # === Commands ===
+    
+    App\Command\TelegramWebhookSetupCommand:
+        arguments:
+            $webhookSecret: '%env(TELEGRAM_WEBHOOK_SECRET)%'
+    
+    # === Controllers ===
+    
+    App\Controller\TelegramWebhookController:
+        arguments:
+            $webhookSecret: '%env(TELEGRAM_WEBHOOK_SECRET)%'
+        tags: ['controller.service_arguments']
+
+    # === Additional Use Cases ===
+    
+    App\Core\UseCase\ProcessTelegramMessage:
+        arguments:
+            $botOwnerTelegramId: '%bot_owner_telegram_id%'

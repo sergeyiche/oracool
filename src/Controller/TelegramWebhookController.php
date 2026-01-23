@@ -1,0 +1,372 @@
+<?php
+
+namespace App\Controller;
+
+use App\Adapter\Telegram\TelegramBotService;
+use App\Adapter\Telegram\TelegramMessageMapper;
+use App\Core\UseCase\ProcessTelegramMessage;
+use Psr\Log\LoggerInterface;
+use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
+use Symfony\Component\HttpFoundation\JsonResponse;
+use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpFoundation\Response;
+use Symfony\Component\Routing\Annotation\Route;
+
+/**
+ * Контроллер для приема webhook от Telegram
+ */
+class TelegramWebhookController extends AbstractController
+{
+    public function __construct(
+        private TelegramBotService $telegramBot,
+        private TelegramMessageMapper $messageMapper,
+        private ProcessTelegramMessage $processMessage,
+        private LoggerInterface $logger,
+        private string $webhookSecret
+    ) {}
+
+    #[Route('/webhook/telegram', name: 'telegram_webhook', methods: ['POST'])]
+    public function webhook(Request $request): JsonResponse
+    {
+        try {
+            // 1. Проверка secret token (безопасность)
+            $secretToken = $request->headers->get('X-Telegram-Bot-Api-Secret-Token');
+            
+            if ($this->webhookSecret && $secretToken !== $this->webhookSecret) {
+                $this->logger->warning('Invalid webhook secret token');
+                return new JsonResponse(['error' => 'Unauthorized'], Response::HTTP_UNAUTHORIZED);
+            }
+
+            // 2. Парсинг update от Telegram
+            $update = json_decode($request->getContent(), true);
+            
+            if (!$update) {
+                $this->logger->error('Failed to parse webhook payload');
+                return new JsonResponse(['error' => 'Invalid payload'], Response::HTTP_BAD_REQUEST);
+            }
+
+            $this->logger->info('Received Telegram webhook', [
+                'update_id' => $update['update_id'] ?? null,
+                'type' => $this->messageMapper->getMessageType($update)
+            ]);
+
+            // 3. Обработка разных типов обновлений
+            $response = match(true) {
+                isset($update['message']) => $this->handleMessage($update),
+                isset($update['callback_query']) => $this->handleCallbackQuery($update),
+                isset($update['edited_message']) => $this->handleEditedMessage($update),
+                default => $this->handleUnsupported($update)
+            };
+
+            return new JsonResponse(['ok' => true, 'result' => $response]);
+
+        } catch (\Exception $e) {
+            $this->logger->error('Webhook processing failed', [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+
+            // Возвращаем 200 чтобы Telegram не ретраил
+            return new JsonResponse([
+                'ok' => false,
+                'error' => $e->getMessage()
+            ], Response::HTTP_OK);
+        }
+    }
+
+    /**
+     * Обработка обычного сообщения
+     */
+    private function handleMessage(array $update): array
+    {
+        $text = $this->messageMapper->extractText($update);
+        $userId = $this->messageMapper->extractUserId($update);
+        $chatId = $this->messageMapper->extractChatId($update);
+        $messageId = $this->messageMapper->extractMessageId($update);
+
+        if (!$text || !$userId || !$chatId) {
+            $this->logger->warning('Invalid message data', ['update' => $update]);
+            return ['status' => 'skipped', 'reason' => 'invalid_data'];
+        }
+
+        // Обработка команд
+        if ($this->messageMapper->isCommand($update)) {
+            return $this->handleCommand($update);
+        }
+
+        // Показываем "печатает..."
+        $this->telegramBot->sendChatAction($chatId, 'typing');
+
+        // Обрабатываем сообщение через Use Case
+        $result = $this->processMessage->execute(
+            text: $text,
+            telegramUserId: $userId,
+            chatId: $chatId,
+            messageId: $messageId
+        );
+
+        $this->logger->info('Message processing result', $result->toArray());
+
+        // Если нужно ответить
+        if ($result->shouldRespond && $result->hasResponse()) {
+            $sentMessage = $this->telegramBot->sendMessage(
+                chatId: $chatId,
+                text: $result->response,
+                replyToMessageId: $messageId,
+                replyMarkup: $this->createFeedbackButtons()
+            );
+
+            return [
+                'status' => 'responded',
+                'message_id' => $sentMessage['message_id'] ?? null,
+                'relevance_score' => $result->relevanceScore,
+                'processing_time_ms' => $result->processingTimeMs
+            ];
+        }
+
+        return [
+            'status' => 'no_response',
+            'reason' => $result->reason,
+            'relevance_score' => $result->relevanceScore
+        ];
+    }
+
+    /**
+     * Обработка команд
+     */
+    private function handleCommand(array $update): array
+    {
+        $command = $this->messageMapper->extractCommand($update);
+        $args = $this->messageMapper->extractCommandArgs($update);
+        $chatId = $this->messageMapper->extractChatId($update);
+        $userId = $this->messageMapper->extractUserId($update);
+
+        $this->logger->info('Processing command', [
+            'command' => $command,
+            'args' => $args,
+            'user_id' => $userId
+        ]);
+
+        $response = match($command) {
+            '/start' => $this->handleStartCommand($userId, $chatId),
+            '/help' => $this->handleHelpCommand($chatId),
+            '/status' => $this->handleStatusCommand($userId, $chatId),
+            '/mode' => $this->handleModeCommand($userId, $chatId, $args),
+            '/stats' => $this->handleStatsCommand($userId, $chatId),
+            default => $this->handleUnknownCommand($chatId, $command)
+        };
+
+        return ['status' => 'command_processed', 'command' => $command, 'response' => $response];
+    }
+
+    /**
+     * Команда /start
+     */
+    private function handleStartCommand(int $userId, int $chatId): array
+    {
+        $isOwner = $this->processMessage->isOwner($userId);
+        
+        $text = "👋 Привет! Я - твой цифровой двойник.\n\n";
+        
+        if ($isOwner) {
+            $text .= "🔹 Ты - владелец бота. Я буду учиться на твоих сообщениях.\n";
+            $text .= "🔹 Используй /help для списка команд.\n";
+            $text .= "🔹 Текущий режим: активный.\n";
+        } else {
+            $text .= "🔹 Я работаю в режиме наблюдения.\n";
+            $text .= "🔹 Буду отвечать только на релевантные вопросы.\n";
+        }
+
+        return $this->telegramBot->sendMessage($chatId, $text);
+    }
+
+    /**
+     * Команда /help
+     */
+    private function handleHelpCommand(int $chatId): array
+    {
+        $text = "📚 <b>Доступные команды:</b>\n\n";
+        $text .= "/start - Начало работы\n";
+        $text .= "/help - Эта справка\n";
+        $text .= "/status - Мой текущий статус\n";
+        $text .= "/mode [silent|active|aggressive] - Изменить режим\n";
+        $text .= "/stats - Статистика базы знаний\n\n";
+        $text .= "💡 <b>Обратная связь:</b>\n";
+        $text .= "✅ Одобрить - добавить ответ в базу знаний\n";
+        $text .= "✏️ Исправить - скорректировать ответ\n";
+        $text .= "🗑 Удалить - удалить неудачный ответ\n";
+
+        return $this->telegramBot->sendMessage($chatId, $text);
+    }
+
+    /**
+     * Команда /status
+     */
+    private function handleStatusCommand(int $userId, int $chatId): array
+    {
+        // TODO: Получить реальный профиль
+        $text = "📊 <b>Текущий статус:</b>\n\n";
+        $text .= "🤖 Режим: активный\n";
+        $text .= "📈 Порог релевантности: 0.7\n";
+        $text .= "💬 Стиль общения: balanced\n";
+        $text .= "📏 Длина ответов: medium\n";
+        $text .= "😊 Эмодзи: включены\n";
+
+        return $this->telegramBot->sendMessage($chatId, $text);
+    }
+
+    /**
+     * Команда /mode
+     */
+    private function handleModeCommand(int $userId, int $chatId, array $args): array
+    {
+        if (empty($args)) {
+            $text = "Использование: /mode [silent|active|aggressive]";
+            return $this->telegramBot->sendMessage($chatId, $text);
+        }
+
+        // TODO: Обновить режим в профиле
+        $mode = $args[0];
+        $text = "✅ Режим изменен на: <b>{$mode}</b>";
+
+        return $this->telegramBot->sendMessage($chatId, $text);
+    }
+
+    /**
+     * Команда /stats
+     */
+    private function handleStatsCommand(int $userId, int $chatId): array
+    {
+        // TODO: Получить реальную статистику
+        $text = "📊 <b>Статистика базы знаний:</b>\n\n";
+        $text .= "📝 Всего записей: 0\n";
+        $text .= "✅ Одобренных ответов: 0\n";
+        $text .= "✏️ Исправлений: 0\n";
+        $text .= "📅 Последнее обновление: -\n";
+
+        return $this->telegramBot->sendMessage($chatId, $text);
+    }
+
+    /**
+     * Неизвестная команда
+     */
+    private function handleUnknownCommand(int $chatId, string $command): array
+    {
+        $text = "❓ Неизвестная команда: {$command}\n\nИспользуй /help для списка команд.";
+        return $this->telegramBot->sendMessage($chatId, $text);
+    }
+
+    /**
+     * Обработка callback query (нажатие на кнопки)
+     */
+    private function handleCallbackQuery(array $update): array
+    {
+        $callbackQuery = $update['callback_query'];
+        $data = $callbackQuery['data'];
+        $userId = $callbackQuery['from']['id'];
+        $chatId = $callbackQuery['message']['chat']['id'];
+        $messageId = $callbackQuery['message']['message_id'];
+
+        $this->logger->info('Processing callback query', [
+            'data' => $data,
+            'user_id' => $userId
+        ]);
+
+        // Парсим callback data (формат: "action:responseId")
+        [$action, $responseId] = explode(':', $data, 2);
+
+        $result = match($action) {
+            'approve' => $this->handleApprove($responseId, $userId, $chatId, $messageId),
+            'correct' => $this->handleCorrect($responseId, $userId, $chatId, $messageId),
+            'delete' => $this->handleDelete($responseId, $userId, $chatId, $messageId),
+            default => ['status' => 'unknown_action']
+        };
+
+        // Отвечаем на callback query
+        $this->telegramBot->answerCallbackQuery(
+            $callbackQuery['id'],
+            $result['message'] ?? 'Выполнено'
+        );
+
+        return $result;
+    }
+
+    /**
+     * Одобрение ответа
+     */
+    private function handleApprove(string $responseId, int $userId, int $chatId, int $messageId): array
+    {
+        // TODO: Сохранить в knowledge base через Use Case
+        
+        $this->telegramBot->editMessage(
+            chatId: $chatId,
+            messageId: $messageId,
+            text: "✅ Ответ одобрен и добавлен в базу знаний"
+        );
+
+        return ['status' => 'approved', 'message' => 'Ответ одобрен'];
+    }
+
+    /**
+     * Исправление ответа
+     */
+    private function handleCorrect(string $responseId, int $userId, int $chatId, int $messageId): array
+    {
+        // TODO: Запросить исправленный вариант
+        
+        $this->telegramBot->sendMessage(
+            chatId: $chatId,
+            text: "✏️ Отправь исправленный вариант ответа в ответ на это сообщение",
+            replyToMessageId: $messageId
+        );
+
+        return ['status' => 'correction_requested', 'message' => 'Жду исправленный вариант'];
+    }
+
+    /**
+     * Удаление ответа
+     */
+    private function handleDelete(string $responseId, int $userId, int $chatId, int $messageId): array
+    {
+        // TODO: Пометить как удаленный
+        
+        $this->telegramBot->deleteMessage($chatId, $messageId);
+
+        return ['status' => 'deleted', 'message' => 'Ответ удален'];
+    }
+
+    /**
+     * Обработка отредактированного сообщения
+     */
+    private function handleEditedMessage(array $update): array
+    {
+        $this->logger->debug('Edited message received, ignoring');
+        return ['status' => 'edited_message_ignored'];
+    }
+
+    /**
+     * Неподдерживаемый тип обновления
+     */
+    private function handleUnsupported(array $update): array
+    {
+        $type = $this->messageMapper->getMessageType($update);
+        $this->logger->debug('Unsupported update type', ['type' => $type]);
+        return ['status' => 'unsupported', 'type' => $type];
+    }
+
+    /**
+     * Создание кнопок обратной связи
+     */
+    private function createFeedbackButtons(): array
+    {
+        return $this->telegramBot->createInlineKeyboard([
+            [
+                ['text' => '✅ Одобрить', 'callback_data' => 'approve:' . uniqid()],
+                ['text' => '✏️ Исправить', 'callback_data' => 'correct:' . uniqid()],
+            ],
+            [
+                ['text' => '🗑 Удалить', 'callback_data' => 'delete:' . uniqid()],
+            ]
+        ]);
+    }
+}

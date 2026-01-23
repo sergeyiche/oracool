@@ -1,0 +1,5 @@
+controllers:
+    resource:
+        path: ../src/Adapter/
+        namespace: App\Adapter
+    type: attribute
