@@ -3,13 +3,15 @@
 namespace App\Core\UseCase;
 
 use App\Core\Domain\User\UserProfile;
+use App\Core\Domain\Conversation\Message;
 use App\Core\Port\UserProfileRepositoryInterface;
 use App\Core\Port\KnowledgeBaseRepositoryInterface;
+use App\Core\Port\Repository\ConversationRepositoryInterface;
 use Psr\Log\LoggerInterface;
 
 /**
  * Use Case: Обработка входящего сообщения из Telegram
- * Оркестрирует CheckRelevance -> GenerateResponse
+ * Оркестрирует: Conversation Management -> CheckRelevance -> GenerateResponse
  */
 class ProcessTelegramMessage
 {
@@ -18,6 +20,7 @@ class ProcessTelegramMessage
         private GenerateResponse $generateResponse,
         private UserProfileRepositoryInterface $profileRepository,
         private KnowledgeBaseRepositoryInterface $knowledgeRepository,
+        private ConversationRepositoryInterface $conversationRepository,
         private LoggerInterface $logger,
         private string $botOwnerTelegramId
     ) {}
@@ -31,8 +34,7 @@ class ProcessTelegramMessage
         string $text,
         int $telegramUserId,
         int $chatId,
-        ?int $messageId = null,
-        array $conversationHistory = []
+        ?int $messageId = null
     ): ProcessingResult {
         $startTime = microtime(true);
 
@@ -40,15 +42,30 @@ class ProcessTelegramMessage
             // 1. Получаем или создаем профиль пользователя
             $profile = $this->getOrCreateProfile((string)$telegramUserId);
 
+            // 2. Получаем или создаём conversation
+            $conversation = $this->conversationRepository->getOrCreateConversation(
+                userId: (string)$telegramUserId,
+                chatId: (string)$chatId
+            );
+
             $this->logger->info('Processing Telegram message', [
                 'user_id' => $telegramUserId,
                 'chat_id' => $chatId,
+                'conversation_id' => $conversation->getId(),
                 'message_id' => $messageId,
                 'bot_mode' => $profile->getBotMode(),
                 'text_length' => strlen($text)
             ]);
 
-            // 2. Проверяем режим бота
+            // 3. Сохраняем incoming сообщение
+            $incomingMessage = Message::incoming(
+                conversationId: $conversation->getId(),
+                content: $text,
+                externalMessageId: $messageId
+            );
+            $this->conversationRepository->saveMessage($incomingMessage);
+
+            // 4. Проверяем режим бота
             if (!$profile->isActive()) {
                 $this->logger->debug('Bot is in silent mode, skipping');
                 
@@ -59,7 +76,7 @@ class ProcessTelegramMessage
                 );
             }
 
-            // 3. Проверяем релевантность сообщения
+            // 5. Проверяем релевантность сообщения
             $relevanceResult = $this->checkRelevance->execute(
                 message: $text,
                 userId: $profile->getUserId(),
@@ -72,7 +89,7 @@ class ProcessTelegramMessage
                 'matches' => $relevanceResult->matchesFound
             ]);
 
-            // 4. Проверяем нужно ли отвечать
+            // 6. Проверяем нужно ли отвечать
             if (!$relevanceResult->isRelevant && $profile->getBotMode() !== 'aggressive') {
                 $this->logger->debug('Message not relevant and bot not in aggressive mode');
                 
@@ -85,17 +102,33 @@ class ProcessTelegramMessage
                 );
             }
 
-            // 5. Генерируем ответ
+            // 7. Загружаем историю диалога из БД
+            $conversationHistory = $this->loadConversationHistory($conversation->getId());
+
+            // 8. Генерируем ответ с учётом истории
             $responseResult = $this->generateResponse->execute(
                 message: $text,
                 profile: $profile,
                 conversationHistory: $conversationHistory
             );
 
+            // 9. Сохраняем outgoing сообщение с метаданными
+            $outgoingMessage = Message::outgoing(
+                conversationId: $conversation->getId(),
+                content: $responseResult->response,
+                relevanceScore: $responseResult->relevanceScore,
+                contextEntriesUsed: $responseResult->contextEntriesUsed,
+                processingTimeMs: (int)$responseResult->processingTimeMs
+            );
+            $this->conversationRepository->saveMessage($outgoingMessage);
+
             $duration = round((microtime(true) - $startTime) * 1000, 2);
 
             $this->logger->info('Message processed successfully', [
+                'conversation_id' => $conversation->getId(),
+                'message_count' => $conversation->getMessageCount() + 2, // incoming + outgoing
                 'response_length' => strlen($responseResult->response),
+                'history_messages' => count($conversationHistory),
                 'total_duration_ms' => $duration
             ]);
 
@@ -114,7 +147,8 @@ class ProcessTelegramMessage
             $this->logger->error('Failed to process Telegram message', [
                 'error' => $e->getMessage(),
                 'user_id' => $telegramUserId,
-                'chat_id' => $chatId
+                'chat_id' => $chatId,
+                'trace' => $e->getTraceAsString()
             ]);
 
             throw new \RuntimeException(
@@ -123,6 +157,20 @@ class ProcessTelegramMessage
                 $e
             );
         }
+    }
+
+    /**
+     * Загружает историю диалога в формате для LLM
+     */
+    private function loadConversationHistory(string $conversationId, int $limit = 10): array
+    {
+        $messages = $this->conversationRepository->getRecentMessages($conversationId, $limit);
+
+        // Преобразуем в формат для LLM
+        return array_map(
+            fn(Message $message) => $message->toLLMFormat(),
+            $messages
+        );
     }
 
     /**

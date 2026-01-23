@@ -4,7 +4,8 @@ namespace App\Command;
 
 use App\Core\Domain\User\UserProfile;
 use App\Core\Port\UserProfileRepositoryInterface;
-use App\Core\UseCase\GenerateResponse;
+use App\Core\Port\Repository\ConversationRepositoryInterface;
+use App\Core\UseCase\ProcessTelegramMessage;
 use Symfony\Component\Console\Attribute\AsCommand;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Input\InputArgument;
@@ -14,13 +15,14 @@ use Symfony\Component\Console\Style\SymfonyStyle;
 
 #[AsCommand(
     name: 'test:response',
-    description: 'Тестирование полного пайплайна генерации ответа (с RAG + LLM)'
+    description: 'Тестирование полного пайплайна генерации ответа (с conversations + RAG + LLM)'
 )]
 class TestFullResponseCommand extends Command
 {
     public function __construct(
-        private GenerateResponse $generateResponse,
-        private UserProfileRepositoryInterface $profileRepository
+        private ProcessTelegramMessage $processMessage,
+        private UserProfileRepositoryInterface $profileRepository,
+        private ConversationRepositoryInterface $conversationRepository
     ) {
         parent::__construct();
     }
@@ -69,15 +71,18 @@ class TestFullResponseCommand extends Command
                 ]
             );
 
-            // Генерируем ответ
-            $io->section('Шаг 2: Генерация ответа (RAG + LLM)');
+            // Обрабатываем сообщение (создаёт conversation + RAG + LLM)
+            $io->section('Шаг 2: Обработка сообщения (Conversation + RAG + LLM)');
             $io->writeln('⏳ Генерация может занять 10-15 секунд...');
             
+            $chatId = 999999999; // Тестовый chat_id
+            
             $startTime = microtime(true);
-            $result = $this->generateResponse->execute(
-                message: $message,
-                profile: $profile,
-                conversationHistory: []
+            $result = $this->processMessage->execute(
+                text: $message,
+                telegramUserId: (int)$userId,
+                chatId: $chatId,
+                messageId: (int)(time())
             );
             $totalTime = round(microtime(true) - $startTime, 2);
             
@@ -86,19 +91,49 @@ class TestFullResponseCommand extends Command
             // Результаты
             $io->section('Шаг 3: Результат');
             
+            if (!$result->shouldRespond) {
+                $io->warning('Бот не должен отвечать. Причина: ' . $result->reason);
+                return Command::SUCCESS;
+            }
+            
             $io->table(
                 ['Метрика', 'Значение'],
                 [
                     ['Релевантность', round($result->relevanceScore * 100, 1) . '%'],
                     ['Использовано записей', $result->contextEntriesUsed],
-                    ['Время обработки', $result->processingTimeMs . 'ms'],
-                    ['Embedding Model', $result->embeddingModel],
-                    ['LLM Model', $result->llmModel]
+                    ['Время обработки', $result->processingTimeMs . 'ms']
                 ]
             );
             
             $io->section('Ответ бота:');
             $io->block($result->response, null, 'fg=cyan;bg=black', ' ', true);
+            
+            // Проверяем conversation
+            $io->section('Шаг 4: Проверка Conversation');
+            $conversation = $this->conversationRepository->findActiveConversation($userId, (string)$chatId);
+            
+            if ($conversation) {
+                $io->success('✅ Conversation создан!');
+                $io->table(
+                    ['Свойство', 'Значение'],
+                    [
+                        ['Conversation ID', substr($conversation->getId(), 0, 8) . '...'],
+                        ['Chat ID', $conversation->getChatId()],
+                        ['Сообщений', $conversation->getMessageCount()],
+                        ['Статус', $conversation->getStatus()->value]
+                    ]
+                );
+
+                // Проверяем сообщения
+                $messages = $this->conversationRepository->getAllMessages($conversation->getId());
+                $io->writeln(sprintf('Сохранено сообщений: %d', count($messages)));
+                $io->writeln('  • Incoming: ' . count(array_filter($messages, fn($m) => $m->isIncoming())));
+                $io->writeln('  • Outgoing: ' . count(array_filter($messages, fn($m) => $m->isOutgoing())));
+                
+                $io->note(sprintf('Просмотр: php bin/console conversation:show %s', $conversation->getId()));
+            } else {
+                $io->warning('⚠️  Conversation не найден');
+            }
             
             $io->success('✅ Полный пайплайн работает корректно!');
             
