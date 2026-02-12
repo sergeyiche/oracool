@@ -94,6 +94,16 @@ class UserProfile
         return $this->embeddingDimension;
     }
 
+    public function getCreatedAt(): \DateTimeImmutable
+    {
+        return $this->createdAt;
+    }
+
+    public function getUpdatedAt(): \DateTimeImmutable
+    {
+        return $this->updatedAt;
+    }
+
     // Setters для обновления профиля
     public function updateCommunicationStyle(string $style): void
     {

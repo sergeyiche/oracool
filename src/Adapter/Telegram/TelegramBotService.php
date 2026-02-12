@@ -43,7 +43,25 @@ class TelegramBotService
             $data['reply_markup'] = json_encode($replyMarkup);
         }
 
-        return $this->makeRequest('sendMessage', $data);
+        try {
+            return $this->makeRequest('sendMessage', $data);
+        } catch (\RuntimeException $e) {
+            $shouldRetryWithoutReply =
+                $replyToMessageId !== null &&
+                str_contains($e->getMessage(), 'message to be replied not found');
+
+            if (!$shouldRetryWithoutReply) {
+                throw $e;
+            }
+
+            $this->logger->warning('Retrying Telegram sendMessage without reply_to_message_id', [
+                'chat_id' => $chatId,
+                'reply_to_message_id' => $replyToMessageId,
+            ]);
+
+            unset($data['reply_to_message_id']);
+            return $this->makeRequest('sendMessage', $data);
+        }
     }
 
     /**

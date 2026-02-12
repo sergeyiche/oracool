@@ -29,6 +29,8 @@ class TelegramWebhookController extends AbstractController
     public function webhook(Request $request): JsonResponse
     {
         try {
+            $rawPayload = $request->getContent();
+
             // 1. Проверка secret token (безопасность)
             $secretToken = $request->headers->get('X-Telegram-Bot-Api-Secret-Token');
             
@@ -38,7 +40,7 @@ class TelegramWebhookController extends AbstractController
             }
 
             // 2. Парсинг update от Telegram
-            $update = json_decode($request->getContent(), true);
+            $update = json_decode($rawPayload, true);
             
             if (!$update) {
                 $this->logger->error('Failed to parse webhook payload');
@@ -47,7 +49,9 @@ class TelegramWebhookController extends AbstractController
 
             $this->logger->info('Received Telegram webhook', [
                 'update_id' => $update['update_id'] ?? null,
-                'type' => $this->messageMapper->getMessageType($update)
+                'type' => $this->messageMapper->getMessageType($update),
+                'payload_bytes' => strlen($rawPayload),
+                'debug_context' => $this->buildUpdateDebugContext($update)
             ]);
 
             // 3. Обработка разных типов обновлений
@@ -57,6 +61,12 @@ class TelegramWebhookController extends AbstractController
                 isset($update['edited_message']) => $this->handleEditedMessage($update),
                 default => $this->handleUnsupported($update)
             };
+
+            $this->logger->info('Telegram webhook processed', [
+                'update_id' => $update['update_id'] ?? null,
+                'result_status' => $response['status'] ?? 'unknown',
+                'result' => $response
+            ]);
 
             return new JsonResponse(['ok' => true, 'result' => $response]);
 
@@ -89,6 +99,14 @@ class TelegramWebhookController extends AbstractController
             return ['status' => 'skipped', 'reason' => 'invalid_data'];
         }
 
+        $this->logger->info('Incoming Telegram message', [
+            'user_id' => $userId,
+            'chat_id' => $chatId,
+            'message_id' => $messageId,
+            'text_preview' => $this->truncateForLog($text),
+            'text_length' => mb_strlen($text)
+        ]);
+
         // Обработка команд
         if ($this->messageMapper->isCommand($update)) {
             return $this->handleCommand($update);
@@ -116,6 +134,16 @@ class TelegramWebhookController extends AbstractController
                 replyMarkup: $this->createFeedbackButtons()
             );
 
+            $this->logger->info('Outgoing Telegram response sent', [
+                'user_id' => $userId,
+                'chat_id' => $chatId,
+                'reply_to_message_id' => $messageId,
+                'sent_message_id' => $sentMessage['message_id'] ?? null,
+                'response_preview' => $this->truncateForLog($result->response),
+                'response_length' => mb_strlen($result->response),
+                'relevance_score' => $result->relevanceScore
+            ]);
+
             return [
                 'status' => 'responded',
                 'message_id' => $sentMessage['message_id'] ?? null,
@@ -123,6 +151,13 @@ class TelegramWebhookController extends AbstractController
                 'processing_time_ms' => $result->processingTimeMs
             ];
         }
+
+        $this->logger->info('No Telegram response generated', [
+            'user_id' => $userId,
+            'chat_id' => $chatId,
+            'reason' => $result->reason,
+            'relevance_score' => $result->relevanceScore
+        ]);
 
         return [
             'status' => 'no_response',
@@ -164,18 +199,15 @@ class TelegramWebhookController extends AbstractController
      */
     private function handleStartCommand(int $userId, int $chatId): array
     {
-        $isOwner = $this->processMessage->isOwner($userId);
-        
-        $text = "👋 Привет! Я - твой цифровой двойник.\n\n";
-        
-        if ($isOwner) {
-            $text .= "🔹 Ты - владелец бота. Я буду учиться на твоих сообщениях.\n";
-            $text .= "🔹 Используй /help для списка команд.\n";
-            $text .= "🔹 Текущий режим: активный.\n";
-        } else {
-            $text .= "🔹 Я работаю в режиме наблюдения.\n";
-            $text .= "🔹 Буду отвечать только на релевантные вопросы.\n";
-        }
+        $text = "Я отголосок твоих вопросов,\n";
+        $text .= "что прячутся в глубинах, как родник.\n";
+        $text .= "Давай меж слов найдем просветы тишины,\n";
+        $text .= "где мысли обретают ясность.\n\n";
+        $text .= "Здесь можно просто быть —\n";
+        $text .= "Без масок, без ролей.\n\n";
+        $text .= "Я буду зеркалом без оценок,\n";
+        $text .= "чтобы помочь заглянуть внутрь себя,\n";
+        $text .= "пространством для твоих открытий.";
 
         return $this->telegramBot->sendMessage($chatId, $text);
     }
@@ -266,6 +298,7 @@ class TelegramWebhookController extends AbstractController
         $userId = $callbackQuery['from']['id'];
         $chatId = $callbackQuery['message']['chat']['id'];
         $messageId = $callbackQuery['message']['message_id'];
+        $originalText = $callbackQuery['message']['text'] ?? '';
 
         $this->logger->info('Processing callback query', [
             'data' => $data,
@@ -276,9 +309,9 @@ class TelegramWebhookController extends AbstractController
         [$action, $responseId] = explode(':', $data, 2);
 
         $result = match($action) {
-            'approve' => $this->handleApprove($responseId, $userId, $chatId, $messageId),
-            'correct' => $this->handleCorrect($responseId, $userId, $chatId, $messageId),
-            'delete' => $this->handleDelete($responseId, $userId, $chatId, $messageId),
+            'approve' => $this->handleApprove($responseId, $userId, $chatId, $messageId, $originalText),
+            'correct' => $this->handleCorrect($responseId, $userId, $chatId, $messageId, $originalText),
+            'delete' => $this->handleDelete($responseId, $userId, $chatId, $messageId, $originalText),
             default => ['status' => 'unknown_action']
         };
 
@@ -294,26 +327,38 @@ class TelegramWebhookController extends AbstractController
     /**
      * Одобрение ответа
      */
-    private function handleApprove(string $responseId, int $userId, int $chatId, int $messageId): array
+    private function handleApprove(string $responseId, int $userId, int $chatId, int $messageId, string $originalText): array
     {
         // TODO: Сохранить в knowledge base через Use Case
         
+        // Удаляем кнопки, оставляя оригинальный текст
+        // Передаём пустой reply_markup для удаления кнопок
         $this->telegramBot->editMessage(
             chatId: $chatId,
             messageId: $messageId,
-            text: "✅ Ответ одобрен и добавлен в базу знаний"
+            text: $originalText,
+            replyMarkup: ['inline_keyboard' => []] // Пустая клавиатура = удаление кнопок
         );
-
-        return ['status' => 'approved', 'message' => 'Ответ одобрен'];
+        
+        return ['status' => 'approved', 'message' => '✅ Ответ одобрен'];
     }
 
     /**
      * Исправление ответа
      */
-    private function handleCorrect(string $responseId, int $userId, int $chatId, int $messageId): array
+    private function handleCorrect(string $responseId, int $userId, int $chatId, int $messageId, string $originalText): array
     {
         // TODO: Запросить исправленный вариант
         
+        // Удаляем кнопки, оставляя оригинальный текст
+        $this->telegramBot->editMessage(
+            chatId: $chatId,
+            messageId: $messageId,
+            text: $originalText,
+            replyMarkup: ['inline_keyboard' => []]
+        );
+        
+        // Отправляем новое сообщение с инструкцией
         $this->telegramBot->sendMessage(
             chatId: $chatId,
             text: "✏️ Отправь исправленный вариант ответа в ответ на это сообщение",
@@ -326,10 +371,11 @@ class TelegramWebhookController extends AbstractController
     /**
      * Удаление ответа
      */
-    private function handleDelete(string $responseId, int $userId, int $chatId, int $messageId): array
+    private function handleDelete(string $responseId, int $userId, int $chatId, int $messageId, string $originalText): array
     {
         // TODO: Пометить как удаленный
         
+        // Для удаления оставляем как есть - сообщение удаляется полностью
         $this->telegramBot->deleteMessage($chatId, $messageId);
 
         return ['status' => 'deleted', 'message' => 'Ответ удален'];
@@ -368,5 +414,37 @@ class TelegramWebhookController extends AbstractController
                 ['text' => '🗑 Удалить', 'callback_data' => 'delete:' . uniqid()],
             ]
         ]);
+    }
+
+    /**
+     * Лаконичный контекст update для отладки webhook.
+     */
+    private function buildUpdateDebugContext(array $update): array
+    {
+        $message = $update['message'] ?? null;
+        $callback = $update['callback_query'] ?? null;
+
+        return [
+            'has_message' => $message !== null,
+            'has_callback_query' => $callback !== null,
+            'user_id' => $message['from']['id'] ?? $callback['from']['id'] ?? null,
+            'chat_id' => $message['chat']['id'] ?? $callback['message']['chat']['id'] ?? null,
+            'message_id' => $message['message_id'] ?? $callback['message']['message_id'] ?? null,
+            'text_preview' => $this->truncateForLog($message['text'] ?? $callback['message']['text'] ?? '')
+        ];
+    }
+
+    private function truncateForLog(string $text, int $maxLength = 160): string
+    {
+        if ($text === '') {
+            return '';
+        }
+
+        $normalized = trim(preg_replace('/\s+/u', ' ', $text) ?? $text);
+        if (mb_strlen($normalized) <= $maxLength) {
+            return $normalized;
+        }
+
+        return mb_substr($normalized, 0, $maxLength - 1) . '…';
     }
 }

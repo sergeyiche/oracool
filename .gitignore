@@ -43,7 +43,6 @@
 
 ###> Composer ###
 composer.phar
-composer.lock
 ###< Composer ###
 
 ###> Node ###
@@ -68,6 +67,10 @@ yarn-error.log
 *.tmp
 *.temp
 *.bak
-*.swp
-*~
+*.old
 ###< Temporary files ###
+
+###> Local deployment/testing artifacts ###
+env.docker.tmp
+*.exe
+###< Local deployment/testing artifacts ###

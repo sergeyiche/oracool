@@ -24,6 +24,7 @@ parameters:
     default_bot_mode: '%env(DEFAULT_BOT_MODE)%'
     default_relevance_threshold: '%env(float:DEFAULT_RELEVANCE_THRESHOLD)%'
     bot_owner_telegram_id: '%env(BOT_OWNER_TELEGRAM_ID)%'
+    global_knowledge_user_id: '858361483'
 
 services:
     _defaults:
@@ -114,7 +115,7 @@ services:
 
     # Выбор провайдера (автоматически переключается скриптом switch_llm.sh)
     App\Core\Port\LLMServiceInterface:
-        alias: 'llm_service.deepseek'
+        alias: 'llm_service.openai'
 
     # === Vector Search Service ===
     
@@ -159,6 +160,7 @@ services:
             $embeddingService: '@App\Core\Port\EmbeddingServiceInterface'
             $vectorSearch: '@App\Core\Port\VectorSearchInterface'
             $logger: '@monolog.logger'
+            $globalKnowledgeUserId: '%global_knowledge_user_id%'
 
     App\Core\UseCase\GenerateResponse:
         arguments:
@@ -166,6 +168,8 @@ services:
             $embeddingService: '@App\Core\Port\EmbeddingServiceInterface'
             $vectorSearch: '@App\Core\Port\VectorSearchInterface'
             $logger: '@monolog.logger'
+            $systemPromptFilePath: '%kernel.project_dir%/config/system_prompt.txt'
+            $globalKnowledgeUserId: '%global_knowledge_user_id%'
 
     # === Adapters ===
     
@@ -174,7 +178,7 @@ services:
     App\Adapter\Telegram\TelegramBotService:
         arguments:
             $httpClient: '@GuzzleHttp\Client'
-            $logger: '@monolog.logger'
+            $logger: '@monolog.logger.telegram'
             $botToken: '%env(TELEGRAM_BOT_TOKEN)%'
 
     # === Commands ===
@@ -187,6 +191,7 @@ services:
     
     App\Controller\TelegramWebhookController:
         arguments:
+            $logger: '@monolog.logger.telegram'
             $webhookSecret: '%env(TELEGRAM_WEBHOOK_SECRET)%'
         tags: ['controller.service_arguments']
 

@@ -4,6 +4,7 @@ namespace App\Command;
 
 use App\Core\Domain\User\UserProfile;
 use App\Core\Port\UserProfileRepositoryInterface;
+use Doctrine\DBAL\Connection;
 use Symfony\Component\Console\Attribute\AsCommand;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Input\InputArgument;
@@ -19,7 +20,8 @@ use Symfony\Component\Console\Style\SymfonyStyle;
 class ProfileCreateCommand extends Command
 {
     public function __construct(
-        private UserProfileRepositoryInterface $profileRepository
+        private UserProfileRepositoryInterface $profileRepository,
+        private Connection $connection
     ) {
         parent::__construct();
     }
@@ -30,7 +32,9 @@ class ProfileCreateCommand extends Command
             ->addArgument('user-id', InputArgument::REQUIRED, 'User ID (Telegram ID)')
             ->addOption('mode', 'm', InputOption::VALUE_REQUIRED, 'Bot mode (silent|active|aggressive)', 'silent')
             ->addOption('style', 's', InputOption::VALUE_REQUIRED, 'Communication style', 'balanced')
-            ->addOption('threshold', 't', InputOption::VALUE_REQUIRED, 'Relevance threshold (0.0-1.0)', '0.7');
+            ->addOption('threshold', 't', InputOption::VALUE_REQUIRED, 'Relevance threshold (0.0-1.0)', '0.7')
+            ->addOption('copy-kb-from', null, InputOption::VALUE_REQUIRED, 'Copy knowledge base from another user (default: 858361483)', '858361483')
+            ->addOption('no-copy-kb', null, InputOption::VALUE_NONE, 'Do not copy knowledge base');
     }
 
     protected function execute(InputInterface $input, OutputInterface $output): int
@@ -68,6 +72,29 @@ class ProfileCreateCommand extends Command
                 ['Use Emojis' => $profile->useEmojis() ? 'Yes' : 'No'],
             );
 
+            // Копируем базу знаний если нужно
+            $noCopy = $input->getOption('no-copy-kb');
+            $copyFrom = $input->getOption('copy-kb-from');
+            
+            if (!$noCopy && $copyFrom) {
+                $io->section('📚 Копирование базы знаний');
+                
+                try {
+                    $copied = $this->copyKnowledgeBase($copyFrom, $userId);
+                    
+                    if ($copied > 0) {
+                        $io->success("✅ Скопировано {$copied} записей из базы знаний пользователя {$copyFrom}");
+                    } else {
+                        $io->warning("⚠️  База знаний пользователя {$copyFrom} пуста или не найдена");
+                    }
+                } catch (\Exception $e) {
+                    $io->error("❌ Ошибка копирования базы знаний: " . $e->getMessage());
+                    // Не падаем, профиль уже создан
+                }
+            } else {
+                $io->note('ℹ️  База знаний не скопирована (используйте --copy-kb-from или импортируйте вручную)');
+            }
+
             return Command::SUCCESS;
 
         } catch (\Exception $e) {
@@ -89,5 +116,36 @@ class ProfileCreateCommand extends Command
             mt_rand(0, 0xffff),
             mt_rand(0, 0xffff)
         );
+    }
+
+    /**
+     * Копирует базу знаний от одного пользователя другому
+     * 
+     * @param string $fromUserId ID пользователя-источника
+     * @param string $toUserId ID пользователя-получателя
+     * @return int Количество скопированных записей
+     */
+    private function copyKnowledgeBase(string $fromUserId, string $toUserId): int
+    {
+        $sql = "
+            INSERT INTO knowledge_base (id, user_id, text, embedding, embedding_model, source, created_at)
+            SELECT 
+                gen_random_uuid(),
+                :to_user_id,
+                text,
+                embedding,
+                embedding_model,
+                source,
+                NOW()
+            FROM knowledge_base
+            WHERE user_id = :from_user_id
+        ";
+
+        $result = $this->connection->executeStatement($sql, [
+            'from_user_id' => $fromUserId,
+            'to_user_id' => $toUserId
+        ]);
+
+        return $result;
     }
 }

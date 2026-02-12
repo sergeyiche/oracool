@@ -6,6 +6,7 @@ use App\Core\Domain\User\UserProfile;
 use App\Core\Port\UserProfileRepositoryInterface;
 use App\Core\Port\Repository\ConversationRepositoryInterface;
 use App\Core\UseCase\ProcessTelegramMessage;
+use Doctrine\DBAL\Connection;
 use Symfony\Component\Console\Attribute\AsCommand;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Input\InputArgument;
@@ -22,7 +23,8 @@ class TestFullResponseCommand extends Command
     public function __construct(
         private ProcessTelegramMessage $processMessage,
         private UserProfileRepositoryInterface $profileRepository,
-        private ConversationRepositoryInterface $conversationRepository
+        private ConversationRepositoryInterface $conversationRepository,
+        private Connection $connection
     ) {
         parent::__construct();
     }
@@ -52,24 +54,32 @@ class TestFullResponseCommand extends Command
         );
 
         try {
-            // Получаем профиль
-            $io->section('Шаг 1: Получение профиля');
+            // Получаем профиль (или сообщаем о создании)
+            $io->section('Шаг 1: Проверка профиля');
             $profile = $this->profileRepository->findByUserId($userId);
             
             if (!$profile) {
-                $io->error("Профиль не найден для User ID: $userId");
-                return Command::FAILURE;
+                $io->warning("Профиль не найден. Будет создан автоматически с параметрами:");
+                $io->table(
+                    ['Параметр', 'Значение'],
+                    [
+                        ['Режим', 'active'],
+                        ['Стиль', 'creative'],
+                        ['Threshold', '0.65'],
+                        ['База знаний', 'Автокопирование из 858361483']
+                    ]
+                );
+            } else {
+                $io->success('Профиль найден');
+                $io->table(
+                    ['Свойство', 'Значение'],
+                    [
+                        ['Режим', $profile->getBotMode()],
+                        ['Стиль', $profile->getCommunicationStyle()],
+                        ['Threshold', $profile->getRelevanceThreshold()]
+                    ]
+                );
             }
-            
-            $io->success('Профиль загружен');
-            $io->table(
-                ['Свойство', 'Значение'],
-                [
-                    ['Режим', $profile->getBotMode()],
-                    ['Стиль', $profile->getCommunicationStyle()],
-                    ['Threshold', $profile->getRelevanceThreshold()]
-                ]
-            );
 
             // Обрабатываем сообщение (создаёт conversation + RAG + LLM)
             $io->section('Шаг 2: Обработка сообщения (Conversation + RAG + LLM)');
@@ -87,6 +97,31 @@ class TestFullResponseCommand extends Command
             $totalTime = round(microtime(true) - $startTime, 2);
             
             $io->success('Ответ сгенерирован за ' . $totalTime . ' сек');
+            
+            // Проверяем создание профиля
+            if (!$profile) {
+                $profile = $this->profileRepository->findByUserId($userId);
+                if ($profile) {
+                    $io->success('✅ Профиль автоматически создан!');
+                    
+                    // Проверяем базу знаний
+                    $kbCount = $this->connection->executeQuery(
+                        'SELECT COUNT(*) FROM knowledge_base WHERE user_id = ?',
+                        [$userId]
+                    )->fetchOne();
+                    
+                    $io->table(
+                        ['Параметр', 'Значение'],
+                        [
+                            ['User ID', $profile->getUserId()],
+                            ['Режим', $profile->getBotMode()],
+                            ['Стиль', $profile->getCommunicationStyle()],
+                            ['Threshold', $profile->getRelevanceThreshold()],
+                            ['База знаний', $kbCount . ' записей']
+                        ]
+                    );
+                }
+            }
             
             // Результаты
             $io->section('Шаг 3: Результат');

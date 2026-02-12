@@ -14,11 +14,14 @@ use Psr\Log\LoggerInterface;
  */
 class GenerateResponse
 {
+    private ?string $systemPromptTemplate = null;
+
     public function __construct(
         private LLMServiceInterface $llmService,
         private EmbeddingServiceInterface $embeddingService,
         private VectorSearchInterface $vectorSearch,
-        private LoggerInterface $logger
+        private LoggerInterface $logger,
+        private string $systemPromptFilePath = ''
     ) {}
 
     /**
@@ -124,49 +127,39 @@ class GenerateResponse
      */
     private function buildSystemPrompt(UserProfile $profile, array $context): string
     {
+        $template = $this->loadSystemPromptTemplate();
         $contextText = $this->formatContext($context);
-        
-        $prompt = "You are a philosophical counselor helping people through existential crises.\n";
-        $prompt .= "CRITICAL: Always respond in RUSSIAN language only. Never use English, Chinese, or other languages in your responses.\n\n";
-        
-        // Стиль общения
-        $styleGuide = match($profile->getCommunicationStyle()) {
-            'formal' => 'Calm, respectful, philosophically deep tone.',
-            'casual' => 'Simple and clear, but with depth.',
-            'creative' => 'Use metaphors, imagery, poetic language.',
-            'technical' => 'Precise, structured, logical.',
-            default => 'Balance depth with simplicity, empathy with wisdom.',
-        };
-        $prompt .= "Communication style: $styleGuide\n";
-        
-        // Длина ответа
-        $lengthGuide = match($profile->getResponseLength()) {
-            'short' => 'Brief responses (2-3 sentences).',
-            'medium' => 'Medium length (3-5 sentences).',
-            'long' => 'Detailed responses with examples.',
-            default => 'Medium length (3-5 sentences).',
-        };
-        $prompt .= "Response length: $lengthGuide\n";
-        
-        // Подход к консультированию
-        $prompt .= "\nYour approach:\n";
-        $prompt .= "- Don't give ready answers—help people find their own\n";
-        $prompt .= "- Ask thought-provoking questions\n";
-        $prompt .= "- Use metaphors from nature and life journeys\n";
-        $prompt .= "- Avoid toxic positivity and banal advice\n";
-        $prompt .= "- Acknowledge life's complexity and ambiguity\n";
-        $prompt .= "- Be empathetic but honest\n";
-        
-        // Контекст из базы знаний (RAG)
-        if (!empty($contextText)) {
-            $prompt .= "\nKnowledge base context (use as foundation):\n";
-            $prompt .= str_repeat('-', 50) . "\n";
-            $prompt .= $contextText;
-            $prompt .= "\n" . str_repeat('-', 50) . "\n";
-            $prompt .= "Draw on Stoicism, Jung, and existential therapy from this knowledge.\n";
+
+        $styleGuide = $this->getStyleGuide($profile);
+        $lengthGuide = $this->getLengthGuide($profile);
+        $contextBlock = $this->buildContextBlock($contextText);
+        $languageRule = 'КРИТИЧНО: всегда отвечай только на русском языке.';
+
+        // Поддерживаем как шаблон с плейсхолдерами, так и обычный текстовый файл без них.
+        $hasPlaceholders = str_contains($template, '{{STYLE_GUIDE}}')
+            || str_contains($template, '{{LENGTH_GUIDE}}')
+            || str_contains($template, '{{CONTEXT_BLOCK}}')
+            || str_contains($template, '{{LANGUAGE_RULE}}');
+
+        if ($hasPlaceholders) {
+            return trim((string) strtr($template, [
+                '{{STYLE_GUIDE}}' => $styleGuide,
+                '{{LENGTH_GUIDE}}' => $lengthGuide,
+                '{{CONTEXT_BLOCK}}' => $contextBlock,
+                '{{LANGUAGE_RULE}}' => $languageRule,
+            ]));
         }
-        
-        $prompt .= "\nRemember: Respond ONLY in Russian language.";
+
+        $prompt = rtrim($template);
+        $prompt .= "\n\nТехнические настройки ответа:";
+        $prompt .= "\n- Стиль коммуникации: {$styleGuide}";
+        $prompt .= "\n- Длина ответа: {$lengthGuide}";
+
+        if ($contextBlock !== '') {
+            $prompt .= "\n\n{$contextBlock}";
+        }
+
+        $prompt .= "\n\n{$languageRule}";
 
         return $prompt;
     }
@@ -248,5 +241,67 @@ class GenerateResponse
             'long' => 800,
             default => 500, // Увеличено для более полных ответов
         };
+    }
+
+    private function getStyleGuide(UserProfile $profile): string
+    {
+        return match($profile->getCommunicationStyle()) {
+            'formal' => 'спокойный, уважительный, философски глубокий',
+            'casual' => 'простой и понятный, но с глубиной',
+            'creative' => 'метафоричный, образный, поэтичный',
+            'technical' => 'точный, структурированный, логичный',
+            default => 'сбалансированный: эмпатия + ясность',
+        };
+    }
+
+    private function getLengthGuide(UserProfile $profile): string
+    {
+        return match($profile->getResponseLength()) {
+            'short' => 'кратко: 2-3 предложения',
+            'medium' => 'средне: 3-5 предложений',
+            'long' => 'подробно: с примерами и конкретикой',
+            default => 'средне: 3-5 предложений',
+        };
+    }
+
+    private function buildContextBlock(string $contextText): string
+    {
+        if ($contextText === '') {
+            return '';
+        }
+
+        return "Контекст из базы знаний (используй как опору):\n"
+            . str_repeat('-', 50) . "\n"
+            . $contextText . "\n"
+            . str_repeat('-', 50);
+    }
+
+    private function loadSystemPromptTemplate(): string
+    {
+        if ($this->systemPromptTemplate !== null) {
+            return $this->systemPromptTemplate;
+        }
+
+        if ($this->systemPromptFilePath === '') {
+            $this->logger->warning('System prompt file path is empty, using default fallback prompt');
+            return $this->systemPromptTemplate = $this->getDefaultPromptTemplate();
+        }
+
+        $content = @file_get_contents($this->systemPromptFilePath);
+        if ($content === false || trim($content) === '') {
+            $this->logger->warning('Failed to load system prompt file, using default fallback prompt', [
+                'path' => $this->systemPromptFilePath
+            ]);
+            return $this->systemPromptTemplate = $this->getDefaultPromptTemplate();
+        }
+
+        return $this->systemPromptTemplate = trim($content);
+    }
+
+    private function getDefaultPromptTemplate(): string
+    {
+        return "Ты — экзистенциальный собеседник и проводник.\n"
+            . "Сопровождай человека к ясности, устойчивости и контакту с реальностью.\n"
+            . "Не лечи и не морализируй, говори тепло, уважительно и недирективно.";
     }
 }

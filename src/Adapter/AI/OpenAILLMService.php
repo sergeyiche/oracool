@@ -49,6 +49,8 @@ class OpenAILLMService implements LLMServiceInterface
     public function generateWithHistory(array $messages, array $options = []): string
     {
         try {
+            $options = $this->normalizeOptionsForModel($options);
+
             $response = $this->openAIClient->chat()->create(array_merge([
                 'model' => $this->model,
                 'messages' => $messages
@@ -69,5 +71,22 @@ class OpenAILLMService implements LLMServiceInterface
     public function getModelName(): string
     {
         return "openai:{$this->model}";
+    }
+
+    /**
+     * GPT-5 family expects max_completion_tokens instead of max_tokens.
+     */
+    private function normalizeOptionsForModel(array $options): array
+    {
+        $isGpt5Model = str_starts_with(strtolower($this->model), 'gpt-5');
+        $hasLegacyMaxTokens = array_key_exists('max_tokens', $options);
+        $hasNewMaxTokens = array_key_exists('max_completion_tokens', $options);
+
+        if ($isGpt5Model && $hasLegacyMaxTokens && !$hasNewMaxTokens) {
+            $options['max_completion_tokens'] = $options['max_tokens'];
+            unset($options['max_tokens']);
+        }
+
+        return $options;
     }
 }
