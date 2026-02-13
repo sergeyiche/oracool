@@ -15,7 +15,8 @@ class CheckRelevance
     public function __construct(
         private EmbeddingServiceInterface $embeddingService,
         private VectorSearchInterface $vectorSearch,
-        private LoggerInterface $logger
+        private LoggerInterface $logger,
+        private string $globalKnowledgeUserId = '858361483'
     ) {}
 
     /**
@@ -48,7 +49,7 @@ class CheckRelevance
                 'vector_dimension' => count($vector)
             ]);
             
-            $similar = $this->vectorSearch->findSimilar(
+            $similar = $this->findSimilarAcrossKnowledgeScopes(
                 vector: $vector,
                 userId: $userId,
                 threshold: $threshold,
@@ -100,5 +101,54 @@ class CheckRelevance
     ): bool {
         $result = $this->execute($message, $userId, $threshold);
         return $result->isRelevant;
+    }
+
+    private function findSimilarAcrossKnowledgeScopes(
+        array $vector,
+        string $userId,
+        float $threshold,
+        int $limit
+    ): array {
+        $allRows = [];
+        foreach ($this->getSearchUserIds($userId) as $searchUserId) {
+            $rows = $this->vectorSearch->findSimilar(
+                vector: $vector,
+                userId: $searchUserId,
+                threshold: $threshold,
+                limit: $limit
+            );
+
+            foreach ($rows as $row) {
+                $row['matched_user_id'] = $searchUserId;
+                $allRows[] = $row;
+            }
+        }
+
+        if (empty($allRows)) {
+            return [];
+        }
+
+        $deduped = [];
+        foreach ($allRows as $row) {
+            $key = sha1(trim((string) ($row['text'] ?? '')));
+            if (!isset($deduped[$key]) || (float) $row['similarity'] > (float) $deduped[$key]['similarity']) {
+                $deduped[$key] = $row;
+            }
+        }
+
+        $merged = array_values($deduped);
+        usort($merged, fn(array $a, array $b) => (float) $b['similarity'] <=> (float) $a['similarity']);
+
+        return array_slice($merged, 0, $limit);
+    }
+
+    private function getSearchUserIds(string $userId): array
+    {
+        $ids = [$userId];
+        if ($this->globalKnowledgeUserId !== '' && $this->globalKnowledgeUserId !== $userId) {
+            $ids[] = $this->globalKnowledgeUserId;
+        }
+
+        return array_values(array_unique($ids));
     }
 }

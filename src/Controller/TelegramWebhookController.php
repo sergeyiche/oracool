@@ -4,6 +4,9 @@ namespace App\Controller;
 
 use App\Adapter\Telegram\TelegramBotService;
 use App\Adapter\Telegram\TelegramMessageMapper;
+use App\Core\Domain\KnowledgeBase\KnowledgeBaseEntry;
+use App\Core\Port\EmbeddingServiceInterface;
+use App\Core\Port\KnowledgeBaseRepositoryInterface;
 use App\Core\UseCase\ProcessTelegramMessage;
 use Psr\Log\LoggerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
@@ -21,6 +24,8 @@ class TelegramWebhookController extends AbstractController
         private TelegramBotService $telegramBot,
         private TelegramMessageMapper $messageMapper,
         private ProcessTelegramMessage $processMessage,
+        private EmbeddingServiceInterface $embeddingService,
+        private KnowledgeBaseRepositoryInterface $knowledgeRepository,
         private LoggerInterface $logger,
         private string $webhookSecret
     ) {}
@@ -329,8 +334,47 @@ class TelegramWebhookController extends AbstractController
      */
     private function handleApprove(string $responseId, int $userId, int $chatId, int $messageId, string $originalText): array
     {
-        // TODO: Сохранить в knowledge base через Use Case
-        
+        $approvedText = trim($originalText);
+        if ($approvedText === '') {
+            return ['status' => 'approved_empty', 'message' => '⚠️ Нечего добавлять в память'];
+        }
+
+        try {
+            $embedding = $this->embeddingService->embed($approvedText);
+            $entry = KnowledgeBaseEntry::fromFeedback(
+                id: $this->generateUuid(),
+                userId: (string) $userId,
+                text: $approvedText,
+                embedding: $embedding,
+                embeddingModel: $this->embeddingService->getModelName(),
+                feedbackId: $responseId
+            );
+            $entry->addTag('approved');
+            $entry->addTag('telegram');
+            $entry->addMetadata('chat_id', $chatId);
+            $entry->addMetadata('message_id', $messageId);
+            $entry->addMetadata('approved_at', date('c'));
+
+            $this->knowledgeRepository->save($entry);
+
+            $this->logger->info('Approved response stored in user knowledge overlay', [
+                'user_id' => $userId,
+                'chat_id' => $chatId,
+                'message_id' => $messageId,
+                'feedback_id' => $responseId,
+                'text_length' => mb_strlen($approvedText)
+            ]);
+        } catch (\Throwable $e) {
+            $this->logger->error('Failed to store approved response in knowledge overlay', [
+                'user_id' => $userId,
+                'chat_id' => $chatId,
+                'message_id' => $messageId,
+                'error' => $e->getMessage()
+            ]);
+
+            return ['status' => 'approved_store_failed', 'message' => '⚠️ Ответ отмечен, но не сохранен в память'];
+        }
+
         // Удаляем кнопки, оставляя оригинальный текст
         // Передаём пустой reply_markup для удаления кнопок
         $this->telegramBot->editMessage(
@@ -446,5 +490,20 @@ class TelegramWebhookController extends AbstractController
         }
 
         return mb_substr($normalized, 0, $maxLength - 1) . '…';
+    }
+
+    private function generateUuid(): string
+    {
+        return sprintf(
+            '%04x%04x-%04x-%04x-%04x-%04x%04x%04x',
+            mt_rand(0, 0xffff),
+            mt_rand(0, 0xffff),
+            mt_rand(0, 0xffff),
+            mt_rand(0, 0x0fff) | 0x4000,
+            mt_rand(0, 0x3fff) | 0x8000,
+            mt_rand(0, 0xffff),
+            mt_rand(0, 0xffff),
+            mt_rand(0, 0xffff)
+        );
     }
 }

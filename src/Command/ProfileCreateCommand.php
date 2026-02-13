@@ -33,7 +33,7 @@ class ProfileCreateCommand extends Command
             ->addOption('mode', 'm', InputOption::VALUE_REQUIRED, 'Bot mode (silent|active|aggressive)', 'silent')
             ->addOption('style', 's', InputOption::VALUE_REQUIRED, 'Communication style', 'balanced')
             ->addOption('threshold', 't', InputOption::VALUE_REQUIRED, 'Relevance threshold (0.0-1.0)', '0.7')
-            ->addOption('copy-kb-from', null, InputOption::VALUE_REQUIRED, 'Copy knowledge base from another user (default: 858361483)', '858361483')
+            ->addOption('copy-kb-from', null, InputOption::VALUE_REQUIRED, 'Copy knowledge base from another user (optional)', null)
             ->addOption('no-copy-kb', null, InputOption::VALUE_NONE, 'Do not copy knowledge base');
     }
 
@@ -92,7 +92,7 @@ class ProfileCreateCommand extends Command
                     // Не падаем, профиль уже создан
                 }
             } else {
-                $io->note('ℹ️  База знаний не скопирована (используйте --copy-kb-from или импортируйте вручную)');
+                $io->note('ℹ️  База знаний не скопирована: используется shared global KB + персональный overlay');
             }
 
             return Command::SUCCESS;
