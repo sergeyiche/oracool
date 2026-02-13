@@ -8,6 +8,10 @@ use App\Core\Domain\KnowledgeBase\KnowledgeBaseEntry;
 use App\Core\Port\EmbeddingServiceInterface;
 use App\Core\Port\KnowledgeBaseRepositoryInterface;
 use App\Core\UseCase\ProcessTelegramMessage;
+use App\Core\Domain\KnowledgeBase\KnowledgeBaseEntry;
+use App\Core\Port\EmbeddingServiceInterface;
+use App\Core\Port\KnowledgeBaseRepositoryInterface;
+use Doctrine\DBAL\Connection;
 use Psr\Log\LoggerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
@@ -24,8 +28,9 @@ class TelegramWebhookController extends AbstractController
         private TelegramBotService $telegramBot,
         private TelegramMessageMapper $messageMapper,
         private ProcessTelegramMessage $processMessage,
-        private EmbeddingServiceInterface $embeddingService,
         private KnowledgeBaseRepositoryInterface $knowledgeRepository,
+        private EmbeddingServiceInterface $embeddingService,
+        private Connection $connection,
         private LoggerInterface $logger,
         private string $webhookSecret
     ) {}
@@ -136,7 +141,7 @@ class TelegramWebhookController extends AbstractController
                 chatId: $chatId,
                 text: $result->response,
                 replyToMessageId: $messageId,
-                replyMarkup: $this->createFeedbackButtons()
+                replyMarkup: $this->createFeedbackButtons($result->responseMessageId)
             );
 
             $this->logger->info('Outgoing Telegram response sent', [
@@ -311,14 +316,18 @@ class TelegramWebhookController extends AbstractController
         ]);
 
         // Парсим callback data (формат: "action:responseId")
-        [$action, $responseId] = explode(':', $data, 2);
+        [$action, $responseId] = array_pad(explode(':', $data, 2), 2, null);
 
-        $result = match($action) {
-            'approve' => $this->handleApprove($responseId, $userId, $chatId, $messageId, $originalText),
-            'correct' => $this->handleCorrect($responseId, $userId, $chatId, $messageId, $originalText),
-            'delete' => $this->handleDelete($responseId, $userId, $chatId, $messageId, $originalText),
-            default => ['status' => 'unknown_action']
-        };
+        if ($responseId === null || $responseId === '') {
+            $result = ['status' => 'invalid_callback', 'message' => 'Некорректные данные кнопки'];
+        } else {
+            $result = match($action) {
+                'approve' => $this->handleApprove($responseId, $userId, $chatId, $messageId, $originalText),
+                'correct' => $this->handleCorrect($responseId, $userId, $chatId, $messageId, $originalText),
+                'delete' => $this->handleDelete($responseId, $userId, $chatId, $messageId, $originalText),
+                default => ['status' => 'unknown_action', 'message' => 'Неизвестное действие']
+            };
+        }
 
         // Отвечаем на callback query
         $this->telegramBot->answerCallbackQuery(
@@ -334,57 +343,38 @@ class TelegramWebhookController extends AbstractController
      */
     private function handleApprove(string $responseId, int $userId, int $chatId, int $messageId, string $originalText): array
     {
-        $approvedText = trim($originalText);
-        if ($approvedText === '') {
-            return ['status' => 'approved_empty', 'message' => '⚠️ Нечего добавлять в память'];
-        }
+        $feedbackId = $this->generateUuid();
+        $this->saveFeedback(
+            feedbackId: $feedbackId,
+            userId: (string)$userId,
+            responseId: $responseId,
+            type: 'approve',
+            originalResponse: $originalText
+        );
 
-        try {
-            $embedding = $this->embeddingService->embed($approvedText);
-            $entry = KnowledgeBaseEntry::fromFeedback(
-                id: $this->generateUuid(),
-                userId: (string) $userId,
-                text: $approvedText,
-                embedding: $embedding,
-                embeddingModel: $this->embeddingService->getModelName(),
-                feedbackId: $responseId
-            );
-            $entry->addTag('approved');
-            $entry->addTag('telegram');
-            $entry->addMetadata('chat_id', $chatId);
-            $entry->addMetadata('message_id', $messageId);
-            $entry->addMetadata('approved_at', date('c'));
+        $embedding = $this->embeddingService->embed($originalText);
+        $entry = KnowledgeBaseEntry::fromFeedback(
+            id: $this->generateUuid(),
+            userId: (string)$userId,
+            text: $originalText,
+            embedding: $embedding,
+            embeddingModel: $this->embeddingService->getModelName(),
+            feedbackId: $feedbackId
+        );
+        $entry->addTag('feedback');
+        $entry->addTag('approved');
+        $entry->addMetadata('feedback_type', 'approve');
+        $entry->addMetadata('response_message_id', $responseId);
+        $this->knowledgeRepository->save($entry);
 
-            $this->knowledgeRepository->save($entry);
-
-            $this->logger->info('Approved response stored in user knowledge overlay', [
-                'user_id' => $userId,
-                'chat_id' => $chatId,
-                'message_id' => $messageId,
-                'feedback_id' => $responseId,
-                'text_length' => mb_strlen($approvedText)
-            ]);
-        } catch (\Throwable $e) {
-            $this->logger->error('Failed to store approved response in knowledge overlay', [
-                'user_id' => $userId,
-                'chat_id' => $chatId,
-                'message_id' => $messageId,
-                'error' => $e->getMessage()
-            ]);
-
-            return ['status' => 'approved_store_failed', 'message' => '⚠️ Ответ отмечен, но не сохранен в память'];
-        }
-
-        // Удаляем кнопки, оставляя оригинальный текст
-        // Передаём пустой reply_markup для удаления кнопок
         $this->telegramBot->editMessage(
             chatId: $chatId,
             messageId: $messageId,
             text: $originalText,
-            replyMarkup: ['inline_keyboard' => []] // Пустая клавиатура = удаление кнопок
+            replyMarkup: ['inline_keyboard' => []]
         );
-        
-        return ['status' => 'approved', 'message' => '✅ Ответ одобрен'];
+
+        return ['status' => 'approved', 'message' => '✅ Ответ одобрен и добавлен в базу знаний'];
     }
 
     /**
@@ -392,17 +382,22 @@ class TelegramWebhookController extends AbstractController
      */
     private function handleCorrect(string $responseId, int $userId, int $chatId, int $messageId, string $originalText): array
     {
-        // TODO: Запросить исправленный вариант
-        
-        // Удаляем кнопки, оставляя оригинальный текст
+        $this->saveFeedback(
+            feedbackId: $this->generateUuid(),
+            userId: (string)$userId,
+            responseId: $responseId,
+            type: 'correct',
+            originalResponse: $originalText,
+            notes: 'correction_requested'
+        );
+
         $this->telegramBot->editMessage(
             chatId: $chatId,
             messageId: $messageId,
             text: $originalText,
             replyMarkup: ['inline_keyboard' => []]
         );
-        
-        // Отправляем новое сообщение с инструкцией
+
         $this->telegramBot->sendMessage(
             chatId: $chatId,
             text: "✏️ Отправь исправленный вариант ответа в ответ на это сообщение",
@@ -417,9 +412,15 @@ class TelegramWebhookController extends AbstractController
      */
     private function handleDelete(string $responseId, int $userId, int $chatId, int $messageId, string $originalText): array
     {
-        // TODO: Пометить как удаленный
-        
-        // Для удаления оставляем как есть - сообщение удаляется полностью
+        $this->saveFeedback(
+            feedbackId: $this->generateUuid(),
+            userId: (string)$userId,
+            responseId: $responseId,
+            type: 'delete',
+            originalResponse: $originalText,
+            notes: 'deleted_by_user'
+        );
+
         $this->telegramBot->deleteMessage($chatId, $messageId);
 
         return ['status' => 'deleted', 'message' => 'Ответ удален'];
@@ -447,17 +448,52 @@ class TelegramWebhookController extends AbstractController
     /**
      * Создание кнопок обратной связи
      */
-    private function createFeedbackButtons(): array
+    private function createFeedbackButtons(?string $responseMessageId): array
     {
         return $this->telegramBot->createInlineKeyboard([
             [
-                ['text' => '✅ Одобрить', 'callback_data' => 'approve:' . uniqid()],
-                ['text' => '✏️ Исправить', 'callback_data' => 'correct:' . uniqid()],
+                ['text' => '✅ Одобрить', 'callback_data' => 'approve:' . ($responseMessageId ?? $this->generateUuid())],
+                ['text' => '✏️ Исправить', 'callback_data' => 'correct:' . ($responseMessageId ?? $this->generateUuid())],
             ],
             [
-                ['text' => '🗑 Удалить', 'callback_data' => 'delete:' . uniqid()],
+                ['text' => '🗑 Удалить', 'callback_data' => 'delete:' . ($responseMessageId ?? $this->generateUuid())],
             ]
         ]);
+    }
+
+    private function saveFeedback(
+        string $feedbackId,
+        string $userId,
+        string $responseId,
+        string $type,
+        ?string $originalResponse = null,
+        ?string $correctedResponse = null,
+        ?string $notes = null
+    ): void {
+        $sql = "
+            INSERT INTO feedback (
+                id, user_id, response_id, feedback_type,
+                original_response, corrected_response, notes, created_at
+            ) VALUES (
+                :id, :user_id, :response_id, :feedback_type,
+                :original_response, :corrected_response, :notes, NOW()
+            )
+        ";
+
+        $this->connection->executeStatement($sql, [
+            'id' => $feedbackId,
+            'user_id' => $userId,
+            'response_id' => $responseId,
+            'feedback_type' => $type,
+            'original_response' => $originalResponse,
+            'corrected_response' => $correctedResponse,
+            'notes' => $notes,
+        ]);
+    }
+
+    private function generateUuid(): string
+    {
+        return (string) $this->connection->fetchOne('SELECT gen_random_uuid()');
     }
 
     /**

@@ -15,6 +15,8 @@ use Psr\Log\LoggerInterface;
 class GenerateResponse
 {
     private ?string $systemPromptTemplate = null;
+    private ?int $systemPromptMtime = null;
+    private ?int $systemPromptSize = null;
 
     public function __construct(
         private LLMServiceInterface $llmService,
@@ -279,13 +281,24 @@ class GenerateResponse
 
     private function loadSystemPromptTemplate(): string
     {
-        if ($this->systemPromptTemplate !== null) {
-            return $this->systemPromptTemplate;
-        }
-
         if ($this->systemPromptFilePath === '') {
             $this->logger->warning('System prompt file path is empty, using default fallback prompt');
             return $this->systemPromptTemplate = $this->getDefaultPromptTemplate();
+        }
+
+        clearstatcache(true, $this->systemPromptFilePath);
+
+        $currentMtime = filemtime($this->systemPromptFilePath);
+        $currentSize = filesize($this->systemPromptFilePath);
+
+        if (
+            $this->systemPromptTemplate !== null
+            && $currentMtime !== false
+            && $currentSize !== false
+            && $this->systemPromptMtime === (int) $currentMtime
+            && $this->systemPromptSize === (int) $currentSize
+        ) {
+            return $this->systemPromptTemplate;
         }
 
         $content = @file_get_contents($this->systemPromptFilePath);
@@ -293,8 +306,17 @@ class GenerateResponse
             $this->logger->warning('Failed to load system prompt file, using default fallback prompt', [
                 'path' => $this->systemPromptFilePath
             ]);
+
+            // Сбрасываем метку времени, чтобы при следующем корректном изменении
+            // система подтянула файл, а не оставалась на fallback-промпте навсегда.
+            $this->systemPromptMtime = null;
+            $this->systemPromptSize = null;
+
             return $this->systemPromptTemplate = $this->getDefaultPromptTemplate();
         }
+
+        $this->systemPromptMtime = $currentMtime !== false ? (int) $currentMtime : null;
+        $this->systemPromptSize = $currentSize !== false ? (int) $currentSize : null;
 
         return $this->systemPromptTemplate = trim($content);
     }
