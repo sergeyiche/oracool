@@ -4,6 +4,9 @@ namespace App\Controller;
 
 use App\Adapter\Telegram\TelegramBotService;
 use App\Adapter\Telegram\TelegramMessageMapper;
+use App\Core\Domain\KnowledgeBase\KnowledgeBaseEntry;
+use App\Core\Port\EmbeddingServiceInterface;
+use App\Core\Port\KnowledgeBaseRepositoryInterface;
 use App\Core\UseCase\ProcessTelegramMessage;
 use App\Core\Domain\KnowledgeBase\KnowledgeBaseEntry;
 use App\Core\Port\EmbeddingServiceInterface;
@@ -523,5 +526,20 @@ class TelegramWebhookController extends AbstractController
         }
 
         return mb_substr($normalized, 0, $maxLength - 1) . '…';
+    }
+
+    private function generateUuid(): string
+    {
+        return sprintf(
+            '%04x%04x-%04x-%04x-%04x-%04x%04x%04x',
+            mt_rand(0, 0xffff),
+            mt_rand(0, 0xffff),
+            mt_rand(0, 0xffff),
+            mt_rand(0, 0x0fff) | 0x4000,
+            mt_rand(0, 0x3fff) | 0x8000,
+            mt_rand(0, 0xffff),
+            mt_rand(0, 0xffff),
+            mt_rand(0, 0xffff)
+        );
     }
 }

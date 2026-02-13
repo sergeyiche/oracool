@@ -23,7 +23,8 @@ class GenerateResponse
         private EmbeddingServiceInterface $embeddingService,
         private VectorSearchInterface $vectorSearch,
         private LoggerInterface $logger,
-        private string $systemPromptFilePath = ''
+        private string $systemPromptFilePath = '',
+        private string $globalKnowledgeUserId = '858361483'
     ) {}
 
     /**
@@ -53,7 +54,7 @@ class GenerateResponse
             // 2. Получаем релевантный контекст из базы знаний (RAG)
             $this->logger->debug('Retrieving relevant context');
             
-            $relevantContext = $this->vectorSearch->findSimilar(
+            $relevantContext = $this->findSimilarAcrossKnowledgeScopes(
                 vector: $vector,
                 userId: $profile->getUserId(),
                 threshold: $profile->getRelevanceThreshold(),
@@ -325,5 +326,54 @@ class GenerateResponse
         return "Ты — экзистенциальный собеседник и проводник.\n"
             . "Сопровождай человека к ясности, устойчивости и контакту с реальностью.\n"
             . "Не лечи и не морализируй, говори тепло, уважительно и недирективно.";
+    }
+
+    private function findSimilarAcrossKnowledgeScopes(
+        array $vector,
+        string $userId,
+        float $threshold,
+        int $limit
+    ): array {
+        $allRows = [];
+        foreach ($this->getSearchUserIds($userId) as $searchUserId) {
+            $rows = $this->vectorSearch->findSimilar(
+                vector: $vector,
+                userId: $searchUserId,
+                threshold: $threshold,
+                limit: $limit
+            );
+
+            foreach ($rows as $row) {
+                $row['matched_user_id'] = $searchUserId;
+                $allRows[] = $row;
+            }
+        }
+
+        if (empty($allRows)) {
+            return [];
+        }
+
+        $deduped = [];
+        foreach ($allRows as $row) {
+            $key = sha1(trim((string) ($row['text'] ?? '')));
+            if (!isset($deduped[$key]) || (float) $row['similarity'] > (float) $deduped[$key]['similarity']) {
+                $deduped[$key] = $row;
+            }
+        }
+
+        $merged = array_values($deduped);
+        usort($merged, fn(array $a, array $b) => (float) $b['similarity'] <=> (float) $a['similarity']);
+
+        return array_slice($merged, 0, $limit);
+    }
+
+    private function getSearchUserIds(string $userId): array
+    {
+        $ids = [$userId];
+        if ($this->globalKnowledgeUserId !== '' && $this->globalKnowledgeUserId !== $userId) {
+            $ids[] = $this->globalKnowledgeUserId;
+        }
+
+        return array_values(array_unique($ids));
     }
 }

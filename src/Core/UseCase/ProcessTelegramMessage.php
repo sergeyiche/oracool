@@ -5,9 +5,7 @@ namespace App\Core\UseCase;
 use App\Core\Domain\User\UserProfile;
 use App\Core\Domain\Conversation\Message;
 use App\Core\Port\UserProfileRepositoryInterface;
-use App\Core\Port\KnowledgeBaseRepositoryInterface;
 use App\Core\Port\Repository\ConversationRepositoryInterface;
-use Doctrine\DBAL\Connection;
 use Psr\Log\LoggerInterface;
 
 /**
@@ -20,12 +18,9 @@ class ProcessTelegramMessage
         private CheckRelevance $checkRelevance,
         private GenerateResponse $generateResponse,
         private UserProfileRepositoryInterface $profileRepository,
-        private KnowledgeBaseRepositoryInterface $knowledgeRepository,
         private ConversationRepositoryInterface $conversationRepository,
-        private Connection $connection,
         private LoggerInterface $logger,
-        private string $botOwnerTelegramId,
-        private string $defaultKnowledgeSourceUserId = '858361483'
+        private string $botOwnerTelegramId
     ) {}
 
     /**
@@ -207,28 +202,9 @@ class ProcessTelegramMessage
                 'threshold' => 0.65
             ]);
 
-            // Автоматически копируем базу знаний
-            try {
-                $copiedCount = $this->copyKnowledgeBase($this->defaultKnowledgeSourceUserId, $userId);
-                
-                if ($copiedCount > 0) {
-                    $this->logger->info('Knowledge base auto-copied', [
-                        'from_user' => $this->defaultKnowledgeSourceUserId,
-                        'to_user' => $userId,
-                        'entries_copied' => $copiedCount
-                    ]);
-                } else {
-                    $this->logger->warning('No knowledge base entries to copy', [
-                        'source_user' => $this->defaultKnowledgeSourceUserId
-                    ]);
-                }
-            } catch (\Exception $e) {
-                $this->logger->error('Failed to copy knowledge base for new user', [
-                    'user_id' => $userId,
-                    'error' => $e->getMessage()
-                ]);
-                // Не падаем, профиль уже создан
-            }
+            $this->logger->info('Using shared global knowledge base for new profile (no per-user KB copy)', [
+                'user_id' => $userId
+            ]);
         }
 
         return $profile;
@@ -257,34 +233,4 @@ class ProcessTelegramMessage
         );
     }
 
-    /**
-     * Копирует базу знаний от одного пользователя другому
-     * 
-     * @param string $fromUserId ID пользователя-источника
-     * @param string $toUserId ID пользователя-получателя
-     * @return int Количество скопированных записей
-     */
-    private function copyKnowledgeBase(string $fromUserId, string $toUserId): int
-    {
-        $sql = "
-            INSERT INTO knowledge_base (id, user_id, text, embedding, embedding_model, source, created_at)
-            SELECT 
-                gen_random_uuid(),
-                :to_user_id,
-                text,
-                embedding,
-                embedding_model,
-                source,
-                NOW()
-            FROM knowledge_base
-            WHERE user_id = :from_user_id
-        ";
-
-        $result = $this->connection->executeStatement($sql, [
-            'from_user_id' => $fromUserId,
-            'to_user_id' => $toUserId
-        ]);
-
-        return $result;
-    }
 }
