@@ -143,7 +143,8 @@ class ProcessTelegramMessage
                 relevanceScore: $relevanceResult->score,
                 matchesFound: $relevanceResult->matchesFound,
                 contextEntriesUsed: $responseResult->contextEntriesUsed,
-                processingTimeMs: $duration
+                processingTimeMs: $duration,
+                responseMessageId: $outgoingMessage->getId()
             );
 
         } catch (\Exception $e) {

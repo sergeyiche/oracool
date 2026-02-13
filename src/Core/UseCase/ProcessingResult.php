@@ -17,7 +17,8 @@ readonly class ProcessingResult
         public ?float $relevanceScore = null,
         public ?int $matchesFound = null,
         public ?int $contextEntriesUsed = null,
-        public ?float $processingTimeMs = null
+        public ?float $processingTimeMs = null,
+        public ?string $responseMessageId = null
     ) {}
 
     public function hasResponse(): bool
@@ -37,6 +38,7 @@ readonly class ProcessingResult
             'context_entries_used' => $this->contextEntriesUsed,
             'processing_time_ms' => $this->processingTimeMs,
             'bot_mode' => $this->profile->getBotMode(),
+            'response_message_id' => $this->responseMessageId,
         ];
     }
 }
